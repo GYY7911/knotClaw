@@ -1,0 +1,25 @@
+{
+  "task_id": "50f808b477bb",
+  "source_url": "https://chat.deepseek.com/share/bz0etehaisvzmm1tlg",
+  "status": "paused",
+  "current_message_index": 0,
+  "total_messages": 51,
+  "processed_indices": [],
+  "selected_indices": [
+    7,
+    8,
+    14
+  ],
+  "exported_indices": [
+    7,
+    8,
+    14
+  ],
+  "temp_file_path": null,
+  "output_file_path": null,
+  "error_message": null,
+  "token_usage": {},
+  "created_at": "2026-03-05T22:56:36.525857",
+  "updated_at": "2026-03-05T23:03:27.685752",
+  "metadata": {}
+}

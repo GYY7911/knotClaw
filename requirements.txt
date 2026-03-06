@@ -1,0 +1,17 @@
+# Knotclaw - 大模型对话归档客户端
+# 依赖列表
+
+# 核心依赖（Python标准库，无需额外安装）
+# - urllib: HTTP请求
+# - json: JSON解析
+# - html: HTML解析
+# - threading: 多线程支持
+# - signal: 信号处理
+
+# 可选依赖（用于增强功能）
+# 浏览器自动化（推荐安装，用于自动获取需要JavaScript渲染的页面）
+selenium>=4.0.0
+webdriver-manager>=4.0.0
+
+# 压缩支持
+# brotli>=1.0.0  # 支持br压缩解码
