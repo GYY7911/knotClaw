@@ -12,9 +12,15 @@ from .error_handler import ValidationError, RequestTooLargeError
 # 支持的URL模式
 SUPPORTED_URL_PATTERNS = [
     # DeepSeek 分享链接
-    r'^https?://chat\.deepseek\.com/.*',
-    r'^https?://.*\.deepseek\.com/.*',
+    r'^https?://chat\.deepseek\.com/share/.*',
+    r'^https?://.*\.deepseek\.com/share/.*',
+    # Gemini 分享链接
+    r'^https?://gemini\.google\.com/share/.*',
+    r'^https?://bard\.google\.com/share/.*',
 ]
+
+# 平台名称映射（用于错误提示）
+SUPPORTED_PLATFORMS = "DeepSeek、Gemini"
 
 # 请求体大小限制（10MB）
 MAX_CONTENT_LENGTH = 10 * 1024 * 1024
@@ -52,7 +58,7 @@ class URLValidator:
 
         # 检查是否为支持的URL
         if not URLValidator.is_supported(url):
-            raise ValidationError("不支持的URL类型，目前仅支持DeepSeek分享链接")
+            raise ValidationError(f"不支持的URL类型，目前支持: {SUPPORTED_PLATFORMS}")
 
         return url
 

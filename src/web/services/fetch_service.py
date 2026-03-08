@@ -191,7 +191,7 @@ class FetchService:
             task.progress = 10
             fetcher = FetcherFactory.get_fetcher(task.url)
             if fetcher is None:
-                raise FetchError("不支持的URL类型")
+                raise FetchError("不支持的URL类型，目前支持: DeepSeek、Gemini")
 
             task.progress = 15
             logger.info(f"[Task {task_id}] Fetcher 已创建，开始获取页面...")
