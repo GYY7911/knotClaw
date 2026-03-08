@@ -35,10 +35,18 @@ except ImportError:
 
 # 配置常量
 DEFAULT_TIMEOUT = 30
-DEFAULT_MAX_WAIT = 90  # Gemini 可能需要更长等待时间（登录）
-DEFAULT_PAGE_LOAD_WAIT = 0.5
-DEFAULT_LOGIN_CHECK_INTERVAL = 2
+DEFAULT_MAX_WAIT = 60  # 最大等待时间（秒）
+DEFAULT_PAGE_LOAD_WAIT = 0.3  # 页面加载轮询间隔（秒）- 优化
+DEFAULT_LOGIN_CHECK_INTERVAL = 1  # 登录检查间隔（秒）- 优化
 CACHE_HTML_PATH = Path(".cache") / "debug" / "gemini" / "gemini_page.html"
+
+# Gemini 页面元素选择器
+GEMINI_SELECTORS = [
+    '.message-content',
+    '.user-query-container',
+    '.response-container',
+    '.presented-response-container',
+]
 
 
 class GeminiFetcher(BaseFetcher):
@@ -184,7 +192,7 @@ class GeminiFetcher(BaseFetcher):
 
     def _fetch_with_browser(self, url: str) -> Optional[str]:
         """
-        使用浏览器获取页面
+        使用浏览器获取页面（优化版）
 
         Args:
             url: 目标URL
@@ -197,24 +205,20 @@ class GeminiFetcher(BaseFetcher):
             logger.info("  启动浏览器...")
             self._driver.get(url)
 
-            # 等待登录和页面加载
             start_time = time.time()
-            last_check_time = 0
             found_elements = False
             login_detected = False
+            check_count = 0  # 检查计数器
 
             while time.time() - start_time < DEFAULT_MAX_WAIT:
                 elapsed = time.time() - start_time
+                check_count += 1
 
-                html = self._driver.page_source
-                html_len = len(html)
-
-                # 检测是否需要登录
+                # 快速检测登录状态（只在需要时获取 current_url）
+                current_url = self._driver.current_url
                 is_login_page = (
-                    "Sign in" in html or
-                    "登录" in html or
-                    "accounts.google.com" in self._driver.current_url or
-                    "myaccount.google.com" in self._driver.current_url
+                    "accounts.google.com" in current_url or
+                    "myaccount.google.com" in current_url
                 )
 
                 if is_login_page:
@@ -224,42 +228,35 @@ class GeminiFetcher(BaseFetcher):
                     time.sleep(DEFAULT_LOGIN_CHECK_INTERVAL)
                     continue
 
-                login_detected = False  # 重置登录检测状态
+                login_detected = False
 
-                # 检查是否有对话元素
-                if elapsed - last_check_time >= 0.5:
-                    last_check_time = elapsed
-                    try:
-                        # Gemini 使用 Angular，检测关键元素
-                        has_content = self._driver.execute_script(
-                            "return document.querySelectorAll('.message-content, .user-query-container, .response-container').length > 0;"
-                        )
-                        if has_content:
-                            found_elements = True
-                            element_count = self._driver.execute_script(
-                                "return document.querySelectorAll('.message-content, .user-query-container, .response-container').length;"
-                            )
-                            logger.info(f"  页面加载完成! 找到{element_count}个消息元素 ({elapsed:.1f}s)")
-                            break
-                    except Exception:
-                        pass
+                # 使用 JavaScript 快速检测元素（比 page_source 快得多）
+                try:
+                    selector = ', '.join(GEMINI_SELECTORS)
+                    element_count = self._driver.execute_script(
+                        f"return document.querySelectorAll('{selector}').length;"
+                    )
 
-                # 如果 HTML 长度稳定且足够大
-                if html_len > 50000 and elapsed > 5 and not found_elements:
-                    try:
-                        element_count = self._driver.execute_script(
-                            "return document.querySelectorAll('.message-content, .user-query-container, .response-container').length;"
-                        )
-                        if element_count > 0:
-                            logger.info(f"  页面加载完成! 找到{element_count}个消息元素 ({elapsed:.1f}s)")
-                            break
-                    except Exception:
-                        pass
+                    if element_count > 0:
+                        found_elements = True
+                        logger.info(f"  页面加载完成! 找到 {element_count} 个消息元素 ({elapsed:.1f}s, 检查 {check_count} 次)")
+                        break
 
-                time.sleep(DEFAULT_PAGE_LOAD_WAIT)
+                except Exception:
+                    pass
 
+                # 使用指数退避：初期快速检查，后期放慢
+                if elapsed < 3:
+                    time.sleep(0.1)  # 前 3 秒：快速检查
+                elif elapsed < 10:
+                    time.sleep(0.3)  # 3-10 秒：中等频率
+                else:
+                    time.sleep(DEFAULT_PAGE_LOAD_WAIT)  # 10 秒后：正常频率
+
+            # 获取最终 HTML
             html = self._driver.page_source
-            logger.info(f"  HTML长度: {len(html)} 字符, 耗时: {time.time() - start_time:.1f}s")
+            total_time = time.time() - start_time
+            logger.info(f"  HTML长度: {len(html)} 字符, 总耗时: {total_time:.1f}s")
 
             # 保存HTML供调试
             self._save_html_for_debug(html)
