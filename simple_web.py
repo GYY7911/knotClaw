@@ -68,7 +68,8 @@ class SimpleHandler(http.server.BaseHTTPRequestHandler):
                         for msg in conv.messages:
                             messages.append({
                                 "role": msg.role.value,
-                                "content": msg.content or msg.summary or ""
+                                "content": msg.content or msg.summary or "",
+                                "isThinking": msg.metadata.get("isThinking", False) if msg.metadata else False
                             })
                         conversation_data = {
                             "title": conv.title,
@@ -121,12 +122,23 @@ INDEX_HTML = """<!DOCTYPE html>
         input[type="text"] { width: 70%; padding: 10px; font-size: 16px; }
         button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; margin: 5px; }
         button:hover { background: #0056b3; }
-        .message { border: 1px solid #ddd; padding: 15px; margin: 10px 0; cursor: pointer; }
-        .message.selected { border-color: green; background: #f0fff0; }
-        .role-user { color: blue; }
-        .role-assistant { color: green; }
         #actions { margin-top: 20px; }
         #loading { color: #666; display: none; }
+
+        /* 对话组样式 */
+        .conversation-group { border: 2px solid #e0e0e0; border-radius: 10px; margin: 15px 0; overflow: hidden; }
+        .user-question { background: #e3f2fd; padding: 15px; font-weight: bold; border-bottom: 1px solid #bbdefb; }
+        .assistant-response { padding: 10px; }
+        .thinking-section { background: #fff3e0; padding: 10px 15px; border-bottom: 1px solid #ffe0b2; }
+        .thinking-header { cursor: pointer; color: #e65100; font-size: 14px; }
+        .thinking-header:hover { text-decoration: underline; }
+        .thinking-content { display: none; margin-top: 10px; padding: 10px; background: #fff8e1; border-radius: 5px; font-size: 13px; color: #666; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+        .thinking-content.show { display: block; }
+        .answer-section { background: #f0fff0; padding: 15px; cursor: pointer; border: 2px solid transparent; }
+        .answer-section:hover { border-color: #4caf50; }
+        .answer-section.selected { border-color: #2e7d32; background: #c8e6c9; }
+        .answer-label { color: #2e7d32; font-weight: bold; margin-bottom: 8px; }
+        .answer-content { white-space: pre-wrap; }
     </style>
 </head>
 <body>
@@ -148,6 +160,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     <script>
         let selected = new Set();
+        let allMessages = [];
 
         async function fetchData() {
             const url = document.getElementById('url').value;
@@ -155,6 +168,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
             document.getElementById('loading').style.display = 'block';
             document.getElementById('messages').innerHTML = '';
+            selected.clear();
 
             await fetch('/fetch', {
                 method: 'POST',
@@ -175,24 +189,93 @@ INDEX_HTML = """<!DOCTYPE html>
 
         function renderMessages(data) {
             document.getElementById('loading').style.display = 'none';
+            allMessages = data.messages;
             let html = '';
-            data.messages.forEach((msg, i) => {
-                const sel = selected.has(i) ? 'selected' : '';
-                html += `<div class="message ${sel}" onclick="toggle(${i})">
-                    <span class="role-${msg.role}">${msg.role === 'user' ? '用户' : '助手'}</span>
-                    <p>${msg.content.substring(0, 200)}${msg.content.length > 200 ? '...' : ''}</p>
-                </div>`;
-            });
+
+            // 调试：显示原始数据
+            console.log('收到数据:', data);
+            console.log('消息数量:', data.messages ? data.messages.length : 0);
+            if (data.messages && data.messages.length > 0) {
+                data.messages.forEach((m, idx) => {
+                    console.log(`消息${idx}: role=${m.role}, isThinking=${m.isThinking}, content=${m.content ? m.content.substring(0, 30) : 'null'}...`);
+                });
+            }
+
+            // 按对话组渲染：用户问题 -> 思考过程 -> 实际回答
+            let i = 0;
+            while (i < data.messages.length) {
+                const msg = data.messages[i];
+
+                if (msg.role === 'user') {
+                    // 用户问题 - 开始一个新组
+                    html += `<div class="conversation-group">`;
+                    html += `<div class="user-question">用户: ${escapeHtml(msg.content)}</div>`;
+
+                    // 查找后续的助手消息
+                    let thinkingContent = null;
+                    let answerContent = null;
+                    let thinkingIdx = -1;
+                    let answerIdx = -1;
+
+                    let j = i + 1;
+                    while (j < data.messages.length && data.messages[j].role === 'assistant') {
+                        if (data.messages[j].isThinking && !thinkingContent) {
+                            thinkingContent = data.messages[j].content;
+                            thinkingIdx = j;
+                        } else if (!data.messages[j].isThinking && !answerContent) {
+                            answerContent = data.messages[j].content;
+                            answerIdx = j;
+                        }
+                        j++;
+                    }
+
+                    html += `<div class="assistant-response">`;
+
+                    // 思考过程（可折叠）
+                    if (thinkingContent) {
+                        html += `<div class="thinking-section">
+                            <div class="thinking-header" onclick="toggleThinking(this)">[+] 点击查看思考过程</div>
+                            <div class="thinking-content">${escapeHtml(thinkingContent)}</div>
+                        </div>`;
+                    }
+
+                    // 实际回答（可选择）
+                    if (answerContent) {
+                        const selClass = selected.has(answerIdx) ? 'selected' : '';
+                        html += `<div class="answer-section ${selClass}" onclick="toggle(${answerIdx})">
+                            <div class="answer-label">助手回答 (点击选择)</div>
+                            <div class="answer-content">${escapeHtml(answerContent.substring(0, 500))}${answerContent.length > 500 ? '...' : ''}</div>
+                        </div>`;
+                    }
+
+                    html += `</div></div>`;
+                    i = j;
+                } else {
+                    i++;
+                }
+            }
+
             document.getElementById('messages').innerHTML = html;
             document.getElementById('actions').style.display = 'block';
             updateCount(data.messages.length);
         }
 
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function toggleThinking(header) {
+            const content = header.nextElementSibling;
+            content.classList.toggle('show');
+            header.textContent = content.classList.contains('show') ? '[-] 收起思考过程' : '[+] 点击查看思考过程';
+        }
+
         function toggle(i) {
             if (selected.has(i)) selected.delete(i);
             else selected.add(i);
-            document.querySelectorAll('.message')[i].classList.toggle('selected');
-            updateCount();
+            renderMessages({messages: allMessages});
         }
 
         function updateCount(total) {
@@ -230,16 +313,17 @@ INDEX_HTML = """<!DOCTYPE html>
 """
 
 
-def run_server(port=8080):
+def run_server(port=8080, open_browser=True):
     print(f"\n启动Web服务器: http://localhost:{port}")
     print("在浏览器中输入分享链接，选择消息后点击导出\n")
 
     # 打开浏览器
-    webbrowser.open(f'http://localhost:{port}')
+    if open_browser:
+        webbrowser.open(f'http://localhost:{port}')
 
     server = http.server.HTTPServer(('', port), SimpleHandler)
     server.serve_forever()
 
 
 if __name__ == "__main__":
-    run_server()
+    run_server(8088)

@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(powershell:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(rm:*)",
+      "Bash(curl:*)",
+      "Bash(start:*)",
+      "Bash(taskkill:*)",
+      "Bash(netstat:*)",
+      "Bash(dir C:\\\\Users\\\\msi\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\F--Vscode-Project-knotclaw\\\\tasks:*)",
+      "Bash(cmd:*)",
+      "Bash(tasklist:*)",
+      "Bash(findstr python:*)",
+      "Bash(pip install:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

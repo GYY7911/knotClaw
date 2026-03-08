@@ -59,15 +59,18 @@ class DeepSeekFetcher(BaseFetcher):
             return
 
         options = Options()
-        options.add_argument("--headless")
+        # 不使用headless模式，让用户可以看到并操作浏览器完成验证
+        # options.add_argument("--headless=new")  # 注释掉headless
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        options.add_argument("--start-maximized")
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
         service = Service(ChromeDriverManager().install())
         self._driver = webdriver.Chrome(service=service, options=options)
+        print("  浏览器已打开，如需验证请在浏览器中完成")
 
     def _close_driver(self):
         """关闭浏览器"""
@@ -99,23 +102,32 @@ class DeepSeekFetcher(BaseFetcher):
             print("  启动浏览器...")
             self._driver.get(url)
 
-            # 等待WAF验证和页面加载
-            max_wait = 45
+            # 等待WAF验证和页面加载 - 增加等待时间
+            max_wait = 120  # 增加到2分钟
             start_time = time.time()
 
             while time.time() - start_time < max_wait:
                 html = self._driver.page_source
 
+                # 检测各种验证页面
                 if "AwsWafIntegration" in html or "challenge-container" in html:
-                    print(f"  WAF验证中... ({int(time.time() - start_time)}s)")
+                    elapsed = int(time.time() - start_time)
+                    print(f"  WAF验证中... ({elapsed}s) 请在浏览器窗口中完成验证")
                     time.sleep(3)
+                    continue
+
+                # 检测CAPTCHA验证
+                if "CAPTCHA" in html or "验证" in html or "拼图" in html or "JavaScript is disabled" in html:
+                    elapsed = int(time.time() - start_time)
+                    print(f"  需要真人验证! ({elapsed}s) 请在浏览器窗口中完成验证后等待...")
+                    time.sleep(5)
                     continue
 
                 # 检查是否有对话元素
                 try:
-                    elements = self._driver.find_elements("css selector", "[class*='message'], [class*='chat']")
+                    elements = self._driver.find_elements("css selector", ".ds-message, .ds-markdown")
                     if elements:
-                        print(f"  页面加载完成! ({int(time.time() - start_time)}s)")
+                        print(f"  页面加载完成! 找到{len(elements)}个消息元素 ({int(time.time() - start_time)}s)")
                         break
                 except:
                     pass
@@ -124,6 +136,13 @@ class DeepSeekFetcher(BaseFetcher):
 
             html = self._driver.page_source
             print(f"  HTML长度: {len(html)} 字符")
+
+            # 保存HTML供调试
+            temp_file = Path("temp") / "deepseek_page.html"
+            temp_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file.write_text(html, encoding='utf-8')
+            print(f"  HTML已保存到: {temp_file}")
+
             return html
 
         except Exception as e:
@@ -131,169 +150,190 @@ class DeepSeekFetcher(BaseFetcher):
             return None
 
     def _extract_messages_with_selenium(self) -> List[Dict]:
-        """使用Selenium从渲染后的页面提取消息"""
+        """使用Selenium从渲染后的页面提取消息 - 简化版"""
         messages = []
 
         try:
-            # 使用BeautifulSoup解析HTML (比JavaScript更可靠)
+            # 先保存HTML到本地
+            html = self._driver.page_source
+            temp_file = Path("temp") / "deepseek_page.html"
+            temp_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file.write_text(html, encoding="utf-8")
+            print(f"  HTML已保存: {len(html)} 字符")
+
+            # 提取逻辑：从ds-message容器中识别用户和助手消息
+            js_script = """
+            var result = [];
+            var msgContainers = document.querySelectorAll('.ds-message');
+
+            for (var i = 0; i < msgContainers.length; i++) {
+                var container = msgContainers[i];
+                var markdown = container.querySelector('.ds-markdown');
+                var thinkContent = container.querySelector('.ds-think-content');
+
+                if (!markdown) {
+                    // 没有ds-markdown -> 用户消息
+                    var userText = (container.innerText || '').trim();
+                    if (userText.length >= 2 && userText.indexOf('One more step') < 0) {
+                        result.push({
+                            role: 'user',
+                            content: userText,
+                            isThinking: false
+                        });
+                    }
+                } else {
+                    // 有ds-markdown -> 助手消息
+                    // 先提取思考内容
+                    if (thinkContent) {
+                        var thinkText = (thinkContent.innerText || '').trim();
+                        if (thinkText.length >= 10) {
+                            result.push({
+                                role: 'assistant',
+                                content: thinkText,
+                                isThinking: true
+                            });
+                        }
+                    }
+
+                    // 再提取回答内容（排除思考部分）
+                    var answerText = '';
+                    var allMd = container.querySelectorAll('.ds-markdown');
+                    for (var j = 0; j < allMd.length; j++) {
+                        // 检查这个markdown是否在think-content内
+                        var parent = allMd[j].parentElement;
+                        var inThink = false;
+                        while (parent && parent !== container) {
+                            if (parent.classList.contains('ds-think-content')) {
+                                inThink = true;
+                                break;
+                            }
+                            parent = parent.parentElement;
+                        }
+                        if (!inThink) {
+                            answerText = (allMd[j].innerText || '').trim();
+                            break;
+                        }
+                    }
+
+                    if (answerText.length >= 5) {
+                        result.push({
+                            role: 'assistant',
+                            content: answerText,
+                            isThinking: false
+                        });
+                    }
+                }
+            }
+
+            return result;
+            """
+
+            raw_messages = self._driver.execute_script(js_script)
+            print(f"  JavaScript提取到 {len(raw_messages) if raw_messages else 0} 条消息")
+
+            if raw_messages:
+                for i, msg_data in enumerate(raw_messages):
+                    content = msg_data.get("content", "")
+                    if content and len(content) >= 5:
+                        # Clean up UI text from content
+                        # Remove "该对话来自分享..." prefix
+                        if "该对话来自分享" in content:
+                            lines = content.split("\n")
+                            content = "\n".join([l for l in lines if "该对话来自分享" not in l and "AI 生成" not in l and "甄别" not in l])
+                        # Remove "已思考" and "已阅读" prefixes from thinking
+                        if msg_data.get("isThinking"):
+                            lines = content.split("\n")
+                            content = "\n".join([l for l in lines if not l.startswith("已思考") and not l.startswith("已阅读")])
+                        content = content.strip()
+
+                        if content and len(content) >= 5:
+                            messages.append({
+                                "id": f"msg_{i}",
+                                "role": msg_data.get("role", "assistant"),
+                                "content": content,
+                                "timestamp": None,
+                                "metadata": {"isThinking": msg_data.get("isThinking", False)}
+                            })
+
+            print(f"  最终提取到 {len(messages)} 条消息 (用户: {sum(1 for m in messages if m['role']=='user')}, 助手: {sum(1 for m in messages if m['role']=='assistant')})")
+
+        except Exception as e:
+            print(f"  Selenium提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return messages
+
+    def _extract_with_beautifulsoup(self) -> List[Dict]:
+        """使用BeautifulSoup的备选提取方法"""
+        messages = []
+        try:
             from bs4 import BeautifulSoup
             import re as regex
 
             html = self._driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
 
-            # 查找所有用户消息 (class包含fbb737a4)
-            user_msgs = soup.find_all(class_=regex.compile('fbb737a4'))
+            # 查找所有包含markdown的元素
+            all_markdown = soup.find_all(class_='ds-markdown')
 
-            # 查找所有助手消息容器 (class包含_74c0879)
-            asst_containers = soup.find_all(class_=regex.compile('_74c0879'))
+            # 查找所有可能的消息容器
+            all_containers = soup.find_all('div', class_=regex.compile(r'.{6,}'))
 
-            # 构建消息列表，交替排列
+            thinking_keywords = ['嗯，', '用户是', '我们被问到', '我计划', '看搜索结果']
+
+            def is_thinking(text):
+                if not text or len(text) < 30:
+                    return False
+                first_100 = text[:100]
+                return any(kw in first_100 for kw in thinking_keywords)
+
             all_messages = []
+            order = 0
 
-            # 思考过程的特征关键词
-            thinking_keywords = [
-                '嗯，用户', '我计划从', '看搜索结果', '用户是', '准备结合',
-                '我们被问到', '我们被问到的是', '我们正在帮助', '我们需要',
-                '这是一个典型的', '从技术角度来说', '根据上下文',
-                '结合之前的对话', '先看看搜索', '看看搜索结果',
-            ]
+            # 从markdown元素提取助手消息
+            for md in all_markdown:
+                text = md.get_text(strip=True)
+                if len(text) >= 20 and not is_thinking(text):
+                    all_messages.append({
+                        "role": "assistant",
+                        "content": text,
+                        "order": order
+                    })
+                    order += 1
 
-            def is_thinking_content(text):
-                """检查是否是思考过程内容"""
-                if not text:
-                    return True
-                text_lower = text.lower()
-                for kw in thinking_keywords:
-                    if kw in text[:150]:
-                        return True
-                # 额外检查：如果开头是第一人称分析，很可能是思考
-                first_50 = text[:50]
-                if any(word in first_50 for word in ['嗯，', '分析', '判断', '推断', '考虑']):
-                    return True
-                return False
-
-            max_len = max(len(user_msgs), len(asst_containers))
-
-            for i in range(max_len):
-                # 添加用户消息
-                if i < len(user_msgs):
-                    text = user_msgs[i].get_text(strip=True)
-                    # 跳过提示文字和代码块输出
-                    if text and not text.startswith('该对话来自分享') and not text.startswith('由 AI 生成'):
-                        # 检查是否是代码输出（通常是路径或命令结果）
-                        if len(text) >= 10:
+            # 尝试识别用户消息
+            for container in all_containers:
+                text = container.get_text(strip=True)
+                # 用户消息通常较短且没有markdown
+                if len(text) >= 10 and len(text) < 2000:
+                    if not container.find(class_='ds-markdown'):
+                        if '该对话来自分享' not in text:
                             all_messages.append({
                                 "role": "user",
                                 "content": text,
-                                "order": i * 2
+                                "order": order
                             })
+                            order += 1
 
-                # 添加助手消息
-                if i < len(asst_containers):
-                    container = asst_containers[i]
-                    # 获取ds-markdown元素
-                    markdowns = container.find_all(class_='ds-markdown')
-
-                    # 找到第一个非思考过程的markdown
-                    for md in markdowns:
-                        text = md.get_text(strip=True)
-                        if len(text) >= 20 and not is_thinking_content(text):
-                            all_messages.append({
-                                "role": "assistant",
-                                "content": text,
-                                "order": i * 2 + 1
-                            })
-                            break
-
-            # 按order排序
+            # 按order排序并去重
             all_messages.sort(key=lambda x: x["order"])
 
-            # 转换为最终格式
-            for i, msg in enumerate(all_messages):
-                messages.append({
-                    "id": f"msg_{i}",
-                    "role": msg["role"],
-                    "content": msg["content"],
-                    "timestamp": None,
-                    "metadata": {}
-                })
-
-            print(f"  提取到 {len(messages)} 条消息 (用户: {sum(1 for m in messages if m['role']=='user')}, 助手: {sum(1 for m in messages if m['role']=='assistant')})")
-
-        except ImportError:
-            print("  BeautifulSoup未安装，回退到JavaScript提取")
-            messages = self._extract_with_javascript()
-        except Exception as e:
-            print(f"  提取消息失败: {e}")
-            import traceback
-            traceback.print_exc()
-
-        return messages
-
-    def _extract_with_javascript(self) -> List[Dict]:
-        """使用JavaScript提取消息的备选方法"""
-        messages = []
-
-        try:
-            js_script = """
-            var result = [];
-            var mainArea = document.querySelector('[class*="_9663006"]') || document.body;
-
-            var userMsgs = mainArea.querySelectorAll('[class*="fbb737a4"]');
-            var asstContainers = mainArea.querySelectorAll('[class*="_74c0879"]');
-
-            var thinkingKeywords = ['嗯，用户', '我计划从', '看搜索结果', '用户是',
-                '我们被问到', '我们正在帮助', '结合之前的对话'];
-
-            function isThinking(text) {
-                if (!text) return true;
-                for (var i = 0; i < thinkingKeywords.length; i++) {
-                    if (text.substring(0, 150).includes(thinkingKeywords[i])) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            var maxLen = Math.max(userMsgs.length, asstContainers.length);
-
-            for (var i = 0; i < maxLen; i++) {
-                if (i < userMsgs.length) {
-                    var text = userMsgs[i].innerText.trim();
-                    if (text.length >= 10 && !text.includes('该对话来自分享')) {
-                        result.push({role: 'user', content: text, order: i * 2});
-                    }
-                }
-                if (i < asstContainers.length) {
-                    var mds = asstContainers[i].querySelectorAll('.ds-markdown');
-                    for (var j = 0; j < mds.length; j++) {
-                        var mdText = mds[j].innerText.trim();
-                        if (mdText.length >= 20 && !isThinking(mdText)) {
-                            result.push({role: 'assistant', content: mdText, order: i * 2 + 1});
-                            break;
-                        }
-                    }
-                }
-            }
-
-            result.sort(function(a, b) { return a.order - b.order; });
-            return result;
-            """
-
-            raw_messages = self._driver.execute_script(js_script)
-
-            for i, msg_data in enumerate(raw_messages):
-                messages.append({
-                    "id": f"msg_{i}",
-                    "role": msg_data.get("role", "assistant"),
-                    "content": msg_data.get("content", ""),
-                    "timestamp": None,
-                    "metadata": {}
-                })
+            seen = set()
+            for msg in all_messages:
+                key = msg["role"] + ":" + msg["content"][:50]
+                if key not in seen:
+                    seen.add(key)
+                    messages.append({
+                        "id": f"msg_{len(messages)}",
+                        "role": msg["role"],
+                        "content": msg["content"],
+                        "timestamp": None,
+                        "metadata": {}
+                    })
 
         except Exception as e:
-            print(f"  JavaScript提取失败: {e}")
+            print(f"  BeautifulSoup提取失败: {e}")
 
         return messages
 
