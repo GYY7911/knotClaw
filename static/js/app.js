@@ -158,13 +158,14 @@ async function startFetch() {
     const url = elements.urlInput.value.trim();
 
     if (!url) {
-        showError('请输入 DeepSeek 分享链接');
+        showError('请输入 AI 对话分享链接');
         elements.urlInput.focus();
         return;
     }
 
-    if (!isValidDeepSeekUrl(url)) {
-        showError('链接格式不正确，请输入有效的 DeepSeek 分享链接');
+    const urlCheck = isValidShareUrl(url);
+    if (!urlCheck.valid) {
+        showError('链接格式不正确，请输入有效的分享链接');
         return;
     }
 
@@ -209,8 +210,30 @@ async function startFetch() {
     }
 }
 
-function isValidDeepSeekUrl(url) {
-    return url.includes('deepseek.com') && url.includes('/share/');
+// 支持的平台列表
+const SUPPORTED_PLATFORMS = [
+    { name: 'DeepSeek', domains: ['deepseek.com', 'chat.deepseek.com'], pattern: '/share/' },
+    { name: 'Gemini', domains: ['gemini.google.com', 'bard.google.com'], pattern: '/share/' }
+];
+
+function isValidShareUrl(url) {
+    try {
+        const urlObj = new URL(url);
+        for (const platform of SUPPORTED_PLATFORMS) {
+            if (platform.domains.some(d => urlObj.hostname.includes(d)) &&
+                url.includes(platform.pattern)) {
+                return { valid: true, platform: platform.name };
+            }
+        }
+    } catch (e) {
+        // URL 解析失败
+    }
+    return { valid: false, platform: null };
+}
+
+function detectPlatform(url) {
+    const result = isValidShareUrl(url);
+    return result.valid ? result.platform : null;
 }
 
 async function pollTaskStatus() {
@@ -399,7 +422,7 @@ function buildConversationGroup(messages, startIndex) {
                             <path d="M12 16v-4"/>
                             <path d="M12 8h.01"/>
                         </svg>
-                        DeepSeek 回答 (${sections.length}个方案 · 点击选择全部)
+                        AI 回答 (${sections.length}个方案 · 点击选择全部)
                     </div>
                     <div class="answer-sections">
             `;
@@ -451,7 +474,7 @@ function buildConversationGroup(messages, startIndex) {
                             <path d="M12 16v-4"/>
                             <path d="M12 8h.01"/>
                         </svg>
-                        DeepSeek 回答 (点击选择)
+                        AI 回答 (点击选择)
                     </div>
                     <div class="answer-content">${escapeHtml(previewContent)}</div>
                 </div>

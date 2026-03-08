@@ -446,6 +446,56 @@ body {
     transform: translateX(3px);
 }
 
+/* ========== 平台标签 ========== */
+.platform-tags {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.platform-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.platform-tag svg {
+    width: 14px;
+    height: 14px;
+    opacity: 0.7;
+}
+
+.platform-tag:hover {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.platform-tag:hover svg {
+    opacity: 1;
+}
+
+.platform-tag[data-platform="deepseek"]:hover {
+    border-color: #4285f4;
+    color: #4285f4;
+}
+
+.platform-tag[data-platform="gemini"]:hover {
+    border-color: #ea4335;
+    color: #ea4335;
+}
+
 .input-hint {
     display: flex;
     align-items: center;
@@ -462,6 +512,11 @@ body {
     border-radius: 4px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
+}
+
+.hint-divider {
+    color: var(--text-tertiary);
+    opacity: 0.5;
 }
 
 /* ========== 加载动画 ========== */

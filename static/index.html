@@ -53,15 +53,32 @@
             <section class="hero" id="hero">
                 <div class="hero-badge">
                     <span class="badge-dot"></span>
-                    DeepSeek 对话归档工具
+                    AI 对话归档工具
                 </div>
                 <h1 class="hero-title">
                     <span class="title-line">保存你的</span>
                     <span class="title-highlight">AI 对话</span>
                 </h1>
                 <p class="hero-desc">
-                    轻松获取、选择、导出 DeepSeek 分享链接中的对话内容
+                    轻松获取、选择、导出 AI 分享链接中的对话内容
                 </p>
+
+                <!-- 平台标签 -->
+                <div class="platform-tags">
+                    <span class="platform-tag" data-platform="deepseek">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M12 6v6l4 2"/>
+                        </svg>
+                        DeepSeek
+                    </span>
+                    <span class="platform-tag" data-platform="gemini">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/>
+                        </svg>
+                        Gemini
+                    </span>
+                </div>
 
                 <!-- 输入区域 -->
                 <div class="input-area" id="inputArea">
@@ -75,7 +92,7 @@
                         <input
                             type="text"
                             id="url"
-                            placeholder="粘贴 DeepSeek 分享链接..."
+                            placeholder="粘贴 DeepSeek 或 Gemini 分享链接..."
                             autocomplete="off"
                             spellcheck="false"
                         >
@@ -89,8 +106,10 @@
                         </button>
                     </div>
                     <div class="input-hint">
-                        <span>支持格式：</span>
-                        <code>https://chat.deepseek.com/share/...</code>
+                        <span>支持：</span>
+                        <code>chat.deepseek.com/share/...</code>
+                        <span class="hint-divider">|</span>
+                        <code>gemini.google.com/share/...</code>
                     </div>
                 </div>
 
