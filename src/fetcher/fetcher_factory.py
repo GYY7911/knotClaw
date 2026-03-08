@@ -6,6 +6,7 @@ from typing import Optional, List, Type
 
 from .base_fetcher import BaseFetcher
 from .deepseek_fetcher import DeepSeekFetcher
+from .gemini_fetcher import GeminiFetcher
 
 
 class FetcherFactory:
@@ -13,10 +14,11 @@ class FetcherFactory:
     抓取器工厂类
     根据URL自动选择合适的抓取器
     """
-    
+
     # 注册的抓取器列表
     _registered_fetchers: List[Type[BaseFetcher]] = [
         DeepSeekFetcher,
+        GeminiFetcher,
     ]
     
     @classmethod

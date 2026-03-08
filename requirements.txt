@@ -15,3 +15,6 @@ webdriver-manager>=4.0.0
 
 # 压缩支持
 # brotli>=1.0.0  # 支持br压缩解码
+
+# Web框架（用于Web界面）
+flask>=2.3.0

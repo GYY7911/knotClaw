@@ -99,16 +99,43 @@ class Message:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Message":
         """从字典创建消息"""
+        timestamp = cls._safe_parse_timestamp(data.get("timestamp"))
         return cls(
             id=data["id"],
             role=MessageRole(data["role"]),
             content=data.get("content"),
             summary=data.get("summary"),
-            timestamp=datetime.fromisoformat(data["timestamp"]) if data.get("timestamp") else None,
+            timestamp=timestamp,
             token_count=data.get("token_count", 0),
             is_loaded=data.get("is_loaded", False),
             metadata=data.get("metadata", {})
         )
+
+    @staticmethod
+    def _safe_parse_timestamp(timestamp: Optional[Any]) -> Optional[datetime]:
+        """安全解析时间戳"""
+        if not timestamp:
+            return None
+
+        if isinstance(timestamp, datetime):
+            return timestamp
+        if isinstance(timestamp, str):
+            if timestamp.endswith("Z"):
+                try:
+                    return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    pass
+            else:
+                try:
+                    return datetime.fromisoformat(timestamp)
+                except ValueError:
+                    pass
+        if isinstance(timestamp, (int, float)):
+            try:
+                return datetime.fromtimestamp(timestamp)
+            except (ValueError, OSError):
+                pass
+        return None
 
 
 @dataclass

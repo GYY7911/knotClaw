@@ -9,7 +9,9 @@ import urllib.request
 import urllib.error
 import sys
 import time
-from typing import Optional, List, Dict, Any
+import logging
+from contextlib import contextmanager
+from typing import Optional, List, Dict, Any, Generator
 from datetime import datetime
 from pathlib import Path
 
@@ -17,73 +19,158 @@ from .base_fetcher import BaseFetcher, FetchResult
 from ..models import Conversation, Message, MessageRole
 
 
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+# 配置日志
+logger = logging.getLogger(__name__)
+
+# Selenium 相关导入（延迟导入以避免强制依赖）
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    webdriver = None
+    Options = None
+    Service = None
+    ChromeDriverManager = None
+
+
+# 配置常量
+DEFAULT_TIMEOUT = 30
+DEFAULT_MAX_WAIT = 60  # WAF 验证最大等待时间（秒）- 从120减少
+DEFAULT_PAGE_LOAD_WAIT = 0.5  # 页面加载轮询间隔（秒）- 从2秒减少
+DEFAULT_WAF_CHECK_INTERVAL = 1  # WAF验证检查间隔（秒）
+CACHE_HTML_PATH = Path(".cache") / "debug" / "deepseek" / "deepseek_page.html"
 
 
 class DeepSeekFetcher(BaseFetcher):
     """
     DeepSeek对话抓取器
     使用浏览器自动化获取渲染后的页面内容
+
+    支持上下文管理器协议，确保资源正确释放：
+        with DeepSeekFetcher() as fetcher:
+            result = fetcher.fetch_all_metadata(url)
     """
 
     SUPPORTED_DOMAINS = ["chat.deepseek.com", "deepseek.com"]
 
-    def __init__(self, page_size: int = 10, timeout: int = 30):
+    def __init__(self, page_size: int = 10, timeout: int = DEFAULT_TIMEOUT):
+        """
+        初始化抓取器
+
+        Args:
+            page_size: 分页大小
+            timeout: 超时时间（秒）
+        """
         super().__init__(page_size)
         self.timeout = timeout
         self._cached_html: str = ""
         self._parsed_data: Dict[str, Any] = {}
         self._driver = None
-
         self._current_url = ""
+
+        if not SELENIUM_AVAILABLE:
+            logger.warning(
+                "Selenium 未安装，浏览器自动化功能不可用。"
+                "请运行: pip install selenium webdriver-manager"
+            )
+
+    def __enter__(self) -> "DeepSeekFetcher":
+        """上下文管理器入口"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """上下文管理器退出，确保资源释放"""
+        self._close_driver()
+        self.clear_cache()
 
     @classmethod
     def can_handle(cls, url: str) -> bool:
+        """检查是否能处理该URL"""
         return any(domain in url for domain in cls.SUPPORTED_DOMAINS) and "/share/" in url
 
-    def _init_driver(self):
-        """初始化浏览器驱动"""
+    def _init_driver(self) -> None:
+        """
+        初始化浏览器驱动
+
+        Raises:
+            ImportError: Selenium 未安装
+            RuntimeError: 驱动初始化失败
+        """
         if self._driver:
             return
 
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.chrome.service import Service
-            from webdriver_manager.chrome import ChromeDriverManager
-        except ImportError as e:
-            print(f"  缺少依赖: {e}")
-            print("  请安装: pip install selenium webdriver-manager")
-            return
+        if not SELENIUM_AVAILABLE:
+            raise ImportError(
+                "Selenium 未安装。请运行: pip install selenium webdriver-manager"
+            )
 
         options = Options()
         # 不使用headless模式，让用户可以看到并操作浏览器完成验证
-        # options.add_argument("--headless=new")  # 注释掉headless
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--start-maximized")
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        options.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
 
-        service = Service(ChromeDriverManager().install())
-        self._driver = webdriver.Chrome(service=service, options=options)
-        print("  浏览器已打开，如需验证请在浏览器中完成")
+        try:
+            service = Service(ChromeDriverManager().install())
+            self._driver = webdriver.Chrome(service=service, options=options)
+            logger.info("浏览器已打开，如需验证请在浏览器中完成")
+        except Exception as e:
+            logger.error(f"浏览器驱动初始化失败: {e}")
+            raise RuntimeError(f"无法初始化浏览器驱动: {e}") from e
 
-    def _close_driver(self):
-        """关闭浏览器"""
-        if self._driver:
-            self._driver.quit()
-            self._driver = None
+    def _close_driver(self) -> None:
+        """安全关闭浏览器驱动"""
+        if self._driver is not None:
+            try:
+                self._driver.quit()
+                logger.debug("浏览器驱动已关闭")
+            except Exception as e:
+                logger.warning(f"关闭浏览器驱动时出错: {e}")
+            finally:
+                self._driver = None
+
+    @contextmanager
+    def _get_driver_context(self) -> Generator[Any, None, None]:
+        """
+        获取浏览器驱动的上下文管理器
+
+        Yields:
+            WebDriver 实例
+        """
+        self._init_driver()
+        try:
+            yield self._driver
+        finally:
+            # 注意：这里不关闭 driver，由外层上下文管理器控制
+            pass
 
     def _fetch_html(self, url: str) -> str:
-        """获取HTML内容"""
+        """
+        获取HTML内容
+
+        Args:
+            url: 目标URL
+
+        Returns:
+            HTML内容字符串
+
+        Raises:
+            ConnectionError: 无法获取页面内容
+        """
         if self._cached_html:
             return self._cached_html
 
-        print(f"\n正在获取页面内容...")
+        logger.info(f"正在获取页面内容...")
         self._current_url = url
 
         # 使用浏览器获取
@@ -96,72 +183,127 @@ class DeepSeekFetcher(BaseFetcher):
         return html
 
     def _fetch_with_browser(self, url: str) -> Optional[str]:
-        """使用浏览器获取页面"""
+        """
+        使用浏览器获取页面
+
+        Args:
+            url: 目标URL
+
+        Returns:
+            HTML内容，失败返回 None
+        """
         try:
             self._init_driver()
-            print("  启动浏览器...")
+            logger.info("  启动浏览器...")
             self._driver.get(url)
 
-            # 等待WAF验证和页面加载 - 增加等待时间
-            max_wait = 120  # 增加到2分钟
+            # 等待WAF验证和页面加载
             start_time = time.time()
+            last_check_time = 0
+            found_elements = False
+            waf_detected = False
 
-            while time.time() - start_time < max_wait:
+            while time.time() - start_time < DEFAULT_MAX_WAIT:
+                elapsed = time.time() - start_time
+
+                # 每0.5秒检查一次页面状态
                 html = self._driver.page_source
+                html_len = len(html)
 
-                # 检测各种验证页面
-                if "AwsWafIntegration" in html or "challenge-container" in html:
-                    elapsed = int(time.time() - start_time)
-                    print(f"  WAF验证中... ({elapsed}s) 请在浏览器窗口中完成验证")
-                    time.sleep(3)
+                # 检测各种验证页面（只在特定情况下输出日志）
+                is_waf = "AwsWafIntegration" in html or "challenge-container" in html
+                is_captcha = "CAPTCHA" in html or "验证" in html or "拼图" in html or "JavaScript is disabled" in html
+
+                if is_waf:
+                    if not waf_detected:
+                        logger.info(f"  WAF验证中... 请在浏览器窗口中完成验证")
+                        waf_detected = True
+                    time.sleep(DEFAULT_WAF_CHECK_INTERVAL)
                     continue
 
-                # 检测CAPTCHA验证
-                if "CAPTCHA" in html or "验证" in html or "拼图" in html or "JavaScript is disabled" in html:
-                    elapsed = int(time.time() - start_time)
-                    print(f"  需要真人验证! ({elapsed}s) 请在浏览器窗口中完成验证后等待...")
-                    time.sleep(5)
+                if is_captcha:
+                    if not waf_detected:
+                        logger.info(f"  需要真人验证! 请在浏览器窗口中完成验证")
+                        waf_detected = True
+                    time.sleep(DEFAULT_WAF_CHECK_INTERVAL)
                     continue
 
-                # 检查是否有对话元素
-                try:
-                    elements = self._driver.find_elements("css selector", ".ds-message, .ds-markdown")
-                    if elements:
-                        print(f"  页面加载完成! 找到{len(elements)}个消息元素 ({int(time.time() - start_time)}s)")
-                        break
-                except:
-                    pass
+                waf_detected = False  # 重置WAF检测状态
 
-                time.sleep(2)
+                # 检查是否有对话元素（优化：减少检测频率）
+                if elapsed - last_check_time >= 0.5:
+                    last_check_time = elapsed
+                    try:
+                        # 使用更快的JavaScript检测
+                        has_content = self._driver.execute_script(
+                            "return document.querySelectorAll('.ds-message, .ds-markdown').length > 0;"
+                        )
+                        if has_content:
+                            found_elements = True
+                            element_count = self._driver.execute_script(
+                                "return document.querySelectorAll('.ds-message, .ds-markdown').length;"
+                            )
+                            logger.info(f"  页面加载完成! 找到{element_count}个消息元素 ({elapsed:.1f}s)")
+                            break
+                    except Exception:
+                        pass
+
+                # 如果HTML长度稳定且足够大，可能已经加载完成
+                if html_len > 50000 and elapsed > 3 and not found_elements:
+                    # 尝试最后一次元素检测
+                    try:
+                        element_count = self._driver.execute_script(
+                            "return document.querySelectorAll('.ds-message, .ds-markdown').length;"
+                        )
+                        if element_count > 0:
+                            logger.info(f"  页面加载完成! 找到{element_count}个消息元素 ({elapsed:.1f}s)")
+                            break
+                    except Exception:
+                        pass
+
+                time.sleep(DEFAULT_PAGE_LOAD_WAIT)
 
             html = self._driver.page_source
-            print(f"  HTML长度: {len(html)} 字符")
+            logger.info(f"  HTML长度: {len(html)} 字符, 耗时: {time.time() - start_time:.1f}s")
 
             # 保存HTML供调试
-            temp_file = Path("temp") / "deepseek_page.html"
-            temp_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_file.write_text(html, encoding='utf-8')
-            print(f"  HTML已保存到: {temp_file}")
+            self._save_html_for_debug(html)
 
             return html
 
         except Exception as e:
-            print(f"  浏览器获取失败: {e}")
+            logger.error(f"  浏览器获取失败: {e}")
             return None
 
+    def _save_html_for_debug(self, html: str) -> None:
+        """保存HTML到缓存文件供调试"""
+        try:
+            CACHE_HTML_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CACHE_HTML_PATH.write_text(html, encoding='utf-8')
+            logger.debug(f"  HTML已保存到: {CACHE_HTML_PATH}")
+        except Exception as e:
+            logger.warning(f"保存HTML缓存文件失败: {e}")
+
     def _extract_messages_with_selenium(self) -> List[Dict]:
-        """使用Selenium从渲染后的页面提取消息 - 简化版"""
+        """
+        使用Selenium从渲染后的页面提取消息
+
+        Returns:
+            消息列表，每条消息包含 id, role, content, timestamp, metadata
+        """
         messages = []
+
+        if self._driver is None:
+            logger.warning("Driver 未初始化，无法提取消息")
+            return messages
 
         try:
             # 先保存HTML到本地
             html = self._driver.page_source
-            temp_file = Path("temp") / "deepseek_page.html"
-            temp_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_file.write_text(html, encoding="utf-8")
-            print(f"  HTML已保存: {len(html)} 字符")
+            self._save_html_for_debug(html)
+            logger.debug(f"  HTML已保存: {len(html)} 字符")
 
-            # 提取逻辑：从ds-message容器中识别用户和助手消息
+            # JavaScript 提取脚本
             js_script = """
             var result = [];
             var msgContainers = document.querySelectorAll('.ds-message');
@@ -229,22 +371,14 @@ class DeepSeekFetcher(BaseFetcher):
             """
 
             raw_messages = self._driver.execute_script(js_script)
-            print(f"  JavaScript提取到 {len(raw_messages) if raw_messages else 0} 条消息")
+            logger.debug(f"  JavaScript提取到 {len(raw_messages) if raw_messages else 0} 条消息")
 
             if raw_messages:
                 for i, msg_data in enumerate(raw_messages):
                     content = msg_data.get("content", "")
                     if content and len(content) >= 5:
-                        # Clean up UI text from content
-                        # Remove "该对话来自分享..." prefix
-                        if "该对话来自分享" in content:
-                            lines = content.split("\n")
-                            content = "\n".join([l for l in lines if "该对话来自分享" not in l and "AI 生成" not in l and "甄别" not in l])
-                        # Remove "已思考" and "已阅读" prefixes from thinking
-                        if msg_data.get("isThinking"):
-                            lines = content.split("\n")
-                            content = "\n".join([l for l in lines if not l.startswith("已思考") and not l.startswith("已阅读")])
-                        content = content.strip()
+                        # 清理UI文本
+                        content = self._clean_message_content(content, msg_data.get("isThinking", False))
 
                         if content and len(content) >= 5:
                             messages.append({
@@ -255,21 +389,137 @@ class DeepSeekFetcher(BaseFetcher):
                                 "metadata": {"isThinking": msg_data.get("isThinking", False)}
                             })
 
-            print(f"  最终提取到 {len(messages)} 条消息 (用户: {sum(1 for m in messages if m['role']=='user')}, 助手: {sum(1 for m in messages if m['role']=='assistant')})")
+            user_count = sum(1 for m in messages if m['role'] == 'user')
+            assistant_count = sum(1 for m in messages if m['role'] == 'assistant')
+            logger.info(f"  最终提取到 {len(messages)} 条消息 (用户: {user_count}, 助手: {assistant_count})")
 
         except Exception as e:
-            print(f"  Selenium提取失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"  Selenium提取失败: {e}")
+            logger.exception("详细错误信息")
 
         return messages
 
+    def _clean_message_content(self, content: str, is_thinking: bool) -> str:
+        """
+        清理消息内容中的UI文本
+
+        Args:
+            content: 原始内容
+            is_thinking: 是否为思考内容
+
+        Returns:
+            清理后的内容
+        """
+        # 移除 "该对话来自分享..." 前缀
+        if "该对话来自分享" in content:
+            lines = content.split("\n")
+            content = "\n".join([
+                l for l in lines
+                if "该对话来自分享" not in l and "AI 生成" not in l and "甄别" not in l
+            ])
+
+        # 移除思考内容中的 "已思考" 和 "已阅读" 前缀
+        if is_thinking:
+            lines = content.split("\n")
+            content = "\n".join([
+                l for l in lines
+                if not l.startswith("已思考") and not l.startswith("已阅读")
+            ])
+
+        # 修复引用标识换行问题
+        # 模式1: 修复单独成行的引用数字（如 "1\n-\n4\n-\n8" -> "[1][4][8]"）
+        content = self._fix_citation_linebreaks(content)
+
+        # 模式2: 移除"复制"和"下载"按钮文本
+        content = re.sub(r'\n复制\n|\n下载\n', ' ', content)
+        content = re.sub(r'\n复制$|\n下载$', '', content)
+
+        return content.strip()
+
+    def _fix_citation_linebreaks(self, content: str) -> str:
+        """
+        修复引用标识被错误换行的问题
+
+        DeepSeek 页面中的引用标识（如 [1]、[2]）在 innerText 提取时
+        可能被处理成单独成行的数字。此函数尝试修复这种格式问题。
+
+        Args:
+            content: 原始内容
+
+        Returns:
+            修复后的内容
+        """
+        lines = content.split('\n')
+        result_lines = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+
+            # 检测是否是引用标识模式：单独的数字行，后跟 "-" 行
+            # 例如: "1" -> "-" -> "4" -> "-" -> "8"
+            if re.match(r'^\d+$', line.strip()):
+                citation_nums = [line.strip()]
+                j = i + 1
+
+                # 收集连续的 数字-横线 模式
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    if next_line == '-':
+                        j += 1
+                        if j < len(lines) and re.match(r'^\d+$', lines[j].strip()):
+                            citation_nums.append(lines[j].strip())
+                            j += 1
+                        else:
+                            break
+                    else:
+                        break
+
+                # 如果收集到多个数字，合并为引用标识
+                if len(citation_nums) > 1:
+                    citation_str = ''.join(f'[{n}]' for n in citation_nums)
+                    # 追加到前一行的末尾
+                    if result_lines:
+                        result_lines[-1] = result_lines[-1].rstrip() + citation_str
+                    else:
+                        result_lines.append(citation_str)
+                    i = j
+                    continue
+                elif len(citation_nums) == 1:
+                    # 单个数字，检查前一行是否以 "-" 或特定字符结尾
+                    if result_lines and result_lines[-1].rstrip().endswith('-'):
+                        # 合并到前一行
+                        result_lines[-1] = result_lines[-1].rstrip()[:-1] + f'[{citation_nums[0]}]'
+                        i += 1
+                        continue
+
+            # 检测行尾的 "-数字" 模式（可能是引用的一部分）
+            if result_lines and re.search(r'-\s*$', result_lines[-1]):
+                if re.match(r'^\d+$', line.strip()):
+                    # 合并
+                    result_lines[-1] = re.sub(r'-\s*$', f'[{line.strip()}]', result_lines[-1])
+                    i += 1
+                    continue
+
+            result_lines.append(line)
+            i += 1
+
+        # 清理多余的空行
+        cleaned = '\n'.join(result_lines)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+
+        return cleaned
+
     def _extract_with_beautifulsoup(self) -> List[Dict]:
-        """使用BeautifulSoup的备选提取方法"""
+        """
+        使用BeautifulSoup的备选提取方法
+
+        Returns:
+            消息列表
+        """
         messages = []
         try:
             from bs4 import BeautifulSoup
-            import re as regex
 
             html = self._driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
@@ -278,11 +528,12 @@ class DeepSeekFetcher(BaseFetcher):
             all_markdown = soup.find_all(class_='ds-markdown')
 
             # 查找所有可能的消息容器
-            all_containers = soup.find_all('div', class_=regex.compile(r'.{6,}'))
+            all_containers = soup.find_all('div', class_=re.compile(r'.{6,}'))
 
             thinking_keywords = ['嗯，', '用户是', '我们被问到', '我计划', '看搜索结果']
 
-            def is_thinking(text):
+            def is_thinking(text: str) -> bool:
+                """判断是否为思考内容"""
                 if not text or len(text) < 30:
                     return False
                 first_100 = text[:100]
@@ -332,8 +583,10 @@ class DeepSeekFetcher(BaseFetcher):
                         "metadata": {}
                     })
 
+        except ImportError:
+            logger.warning("BeautifulSoup 未安装，备选提取方法不可用")
         except Exception as e:
-            print(f"  BeautifulSoup提取失败: {e}")
+            logger.error(f"BeautifulSoup提取失败: {e}")
 
         return messages
 
@@ -525,7 +778,7 @@ class DeepSeekFetcher(BaseFetcher):
         return None
 
     def clear_cache(self) -> None:
-        """清除缓存"""
+        """清除缓存数据"""
         self._cached_html = ""
         self._parsed_data = {}
-        self._close_driver()
+        # 注意：不在这里关闭 driver，由上下文管理器控制
