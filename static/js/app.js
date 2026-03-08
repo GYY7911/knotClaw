@@ -591,7 +591,7 @@ async function toggleSelection(index, event) {
         state.selectedIndices.add(index);
     }
 
-    // 更新 UI
+    // 更新 UI（包含全选按钮状态更新）
     renderMessages({ messages: state.allMessages });
 
     // 同步到服务器
@@ -670,6 +670,13 @@ function updateSelectionUI() {
     elements.selectedCount.textContent = totalCount;
     elements.exportCount.textContent = totalCount;
     elements.exportBtn.disabled = totalCount === 0;
+
+    // 更新全选按钮状态
+    if (state.selectedIndices.size === state.allMessages.length && state.allMessages.length > 0) {
+        elements.selectAllBtn.classList.add('checked');
+    } else {
+        elements.selectAllBtn.classList.remove('checked');
+    }
 }
 
 // ========== 思考内容展开/折叠 ==========

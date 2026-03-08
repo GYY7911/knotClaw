@@ -2,7 +2,7 @@
 Markdown导出器
 将对话导出为结构清晰的Markdown文件
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +10,8 @@ import json
 import re
 
 from ..models import Conversation, Message, MessageRole
+from .post_processor import MarkdownPostProcessor, process_content
+from .platform_utils import get_platform_from_url
 
 
 @dataclass
@@ -37,6 +39,12 @@ class ExportOptions:
     max_content_length: Optional[int] = None
     # 截断后缀
     truncate_suffix: str = "\n\n... (内容已截断)"
+    # 启用后处理（格式优化）
+    enable_post_processing: bool = True
+    # 元数据位置：'footer' 或 'header'
+    metadata_position: str = 'footer'
+    # 平台名称（用于文件名生成）
+    platform: Optional[str] = None
 
 
 class ContentFormatter:
@@ -61,7 +69,8 @@ class ContentFormatter:
             r'^\s*(curl|wget|chmod|mkdir|cd|ls|cp|mv|rm|cat|echo)\s+',
             r'^\s*export\s+\w+=',
             r'\|\s*(grep|sed|awk|sort|uniq|head|tail)',
-            r'\$\{?\w+\}?',  # 环境变量
+            r'\$\(\w+\)',  # 命令替换 $(command)
+            r'\$\{[\w_]+\}',  # 变量 ${var}
         ],
         'javascript': [
             r'\b(function|const|let|var)\s+\w+\s*[=\(]',
@@ -274,9 +283,14 @@ class MarkdownExporter:
 
         # 生成文件名
         if not filename:
-            filename = self._generate_filename(conversation)
+            platform = options.platform or ""
+            filename = self._generate_filename(conversation, platform)
 
+        # 处理子目录（如果文件名包含路径分隔符）
         file_path = self.output_dir / f"{filename}.md"
+
+        # 确保父目录存在
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 生成Markdown内容
         content = self._generate_markdown(conversation, options)
@@ -405,24 +419,54 @@ class MarkdownExporter:
 
         return final_path
 
-    def _generate_filename(self, conversation: Conversation) -> str:
-        """生成文件名"""
+    def _generate_filename(self, conversation: Conversation, platform: str = "") -> str:
+        """
+        生成文件名
+
+        格式: {平台}/{日期}_{标题}
+        例如: DeepSeek/20260308_AI培训计划
+
+        Args:
+            conversation: 对话对象
+            platform: 平台名称（如 "DeepSeek", "Gemini"）
+
+        Returns:
+            文件名（不含扩展名）
+        """
         # 清理标题中的非法字符
         title = conversation.title or "未命名对话"
         safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
         safe_title = safe_title[:50]  # 限制长度
 
-        # 添加时间戳
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 日期
+        date_str = datetime.now().strftime("%Y%m%d")
 
-        return f"{safe_title}_{timestamp}"
+        # 确定平台名称
+        if not platform and conversation.source_url:
+            platform = get_platform_from_url(conversation.source_url)
+        if not platform:
+            platform = "Unknown"
+
+        # 生成文件名: {平台}/{日期}_{标题}
+        return f"{platform}/{date_str}_{safe_title}"
+
+    def _sanitize_title(self, title: str) -> str:
+        """清理标题中的非法字符"""
+        safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
+        return safe_title[:50]  # 限制长度
 
     def _generate_markdown(self, conversation: Conversation, options: ExportOptions) -> str:
         """生成完整的Markdown内容"""
         parts = []
 
-        # 头部
+        # 头部（标题）
         parts.append(self._generate_header(conversation, options))
+
+        # 元数据位置：header 模式
+        if options.metadata_position == 'header' and options.include_metadata:
+            parts.append("\n")
+            parts.append(self._generate_metadata_block(conversation, options))
+
         parts.append("\n\n---\n\n")
 
         # 消息列表
@@ -432,67 +476,75 @@ class MarkdownExporter:
 
         # 尾部
         parts.append("---\n\n")
+
+        # 元数据位置：footer 模式（默认）
+        if options.metadata_position != 'header' and options.include_metadata:
+            parts.append(self._generate_metadata_block(conversation, options))
+            parts.append("\n\n")
+
         parts.append(self._generate_footer(conversation, options))
 
-        return "".join(parts)
+        result = "".join(parts)
+
+        # 应用后处理
+        if options.enable_post_processing:
+            result = process_content(result)
+
+        return result
 
     def _generate_header(self, conversation: Conversation, options: ExportOptions) -> str:
-        """生成Markdown头部"""
+        """生成Markdown头部（仅标题）"""
+        title = options.custom_title or conversation.title
+        return f"# {title}"
+
+    def _generate_metadata_block(self, conversation: Conversation, options: ExportOptions) -> str:
+        """生成元数据块"""
         lines = []
 
-        # 标题
-        title = options.custom_title or conversation.title
-        lines.append(f"# {title}")
-        lines.append("")
+        if options.include_source_url and conversation.source_url:
+            lines.append(f"> 来源: {conversation.source_url}")
 
-        if options.include_metadata:
-            lines.append("## 📋 对话信息")
-            lines.append("")
-
-            if options.include_source_url and conversation.source_url:
-                lines.append(f"- **来源**: {conversation.source_url}")
-
-            if options.include_timestamps:
-                if conversation.created_at:
-                    lines.append(f"- **创建时间**: {conversation.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
-                if conversation.updated_at:
-                    lines.append(f"- **更新时间**: {conversation.updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
-
-            lines.append(f"- **消息数量**: {len(conversation.messages)}")
-
-            if options.include_token_stats:
-                lines.append(f"- **预估Token数**: {conversation.total_tokens}")
-
-            lines.append("")
+        if options.include_timestamps:
+            export_time = datetime.now().strftime('%Y-%m-%d %H:%M')
+            lines.append(f"> 导出时间: {export_time}")
 
         return "\n".join(lines)
 
     def _format_message(self, message: Message, index: int, options: ExportOptions) -> str:
-        """格式化单条消息"""
+        """
+        格式化单条消息
+
+        新格式：
+        - 用户消息: # 用户：
+        - 思考过程: # 思考过程：
+        - 助手消息: # Deepseek回答： 或 # 回答：
+        """
         lines = []
 
         # 检查是否为思考过程
         is_thinking = message.metadata.get("isThinking", False) if message.metadata else False
 
-        # 消息标题
+        # 获取平台信息（用于助手消息标题）
+        platform = options.platform or ""
+        if not platform and hasattr(message, 'source_url'):
+            platform = get_platform_from_url(message.source_url) if message.source_url else ""
+
+        # 生成消息标题
         if is_thinking:
-            role_emoji = "🤔"
-            role_name = "思考过程"
+            role_header = "# 思考过程："
         elif message.role == MessageRole.USER:
-            role_emoji = "👤"
-            role_name = "用户"
+            role_header = "# 用户："
         else:
-            role_emoji = "🤖"
-            role_name = "助手"
+            # 助手消息：使用平台名称
+            if platform:
+                role_header = f"# {platform}回答："
+            else:
+                role_header = "# 回答："
 
-        if options.include_message_index:
-            lines.append(f"### {role_emoji} {role_name} (#{index + 1})")
-        else:
-            lines.append(f"### {role_emoji} {role_name}")
-
+        lines.append(role_header)
         lines.append("")
 
-        # 时间戳
+        # 时间戳（可选）
         if options.include_timestamps and message.timestamp:
             lines.append(f"*{message.timestamp.strftime('%Y-%m-%d %H:%M:%S')}*")
             lines.append("")

@@ -770,6 +770,36 @@ body {
     color: var(--accent-primary);
 }
 
+/* 全选按钮选中状态 */
+.select-all-checkbox {
+    position: relative;
+    width: 16px;
+    height: 16px;
+}
+
+.select-all-checkbox svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 16px;
+    height: 16px;
+}
+
+.select-all-checkbox .check-icon {
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+}
+
+.action-btn.checked .select-all-checkbox .check-icon {
+    opacity: 1;
+}
+
+.action-btn.checked {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: white;
+}
+
 .action-btn.primary {
     background: var(--accent-gradient);
     border-color: transparent;
