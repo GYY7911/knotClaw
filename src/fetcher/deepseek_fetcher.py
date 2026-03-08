@@ -4,10 +4,6 @@ DeepSeek对话抓取器
 使用浏览器自动化获取渲染后的页面内容
 """
 import re
-import json
-import urllib.request
-import urllib.error
-import sys
 import time
 import logging
 from contextlib import contextmanager
@@ -39,10 +35,17 @@ except ImportError:
 
 # 配置常量
 DEFAULT_TIMEOUT = 30
-DEFAULT_MAX_WAIT = 60  # WAF 验证最大等待时间（秒）- 从120减少
-DEFAULT_PAGE_LOAD_WAIT = 0.5  # 页面加载轮询间隔（秒）- 从2秒减少
+DEFAULT_MAX_WAIT = 60  # WAF 验证最大等待时间（秒）
+DEFAULT_PAGE_LOAD_WAIT = 0.3  # 页面加载轮询间隔（秒）- 优化
 DEFAULT_WAF_CHECK_INTERVAL = 1  # WAF验证检查间隔（秒）
 CACHE_HTML_PATH = Path(".cache") / "debug" / "deepseek" / "deepseek_page.html"
+
+# DeepSeek 页面元素选择器
+DEEPSEEK_SELECTORS = '.ds-message, .ds-markdown'
+
+# HTML 稳定性检测常量
+MIN_HTML_LEN_FOR_STABLE = 10000  # 认为 HTML 有意义的最小长度（字符数）
+STABLE_CHECK_THRESHOLD = 3       # HTML 长度连续相同的次数阈值
 
 
 class DeepSeekFetcher(BaseFetcher):
@@ -184,7 +187,13 @@ class DeepSeekFetcher(BaseFetcher):
 
     def _fetch_with_browser(self, url: str) -> Optional[str]:
         """
-        使用浏览器获取页面
+        使用浏览器获取页面（优化版）
+
+        性能优化策略：
+        1. 使用 JavaScript 快速检测元素和 WAF 状态，避免每次获取 page_source
+        2. 指数退避策略：初期快速检查，后期放慢
+        3. 只在最后获取一次 page_source
+        4. WAF 检测时同时检测元素，避免错过已加载的内容
 
         Args:
             url: 目标URL
@@ -197,74 +206,83 @@ class DeepSeekFetcher(BaseFetcher):
             logger.info("  启动浏览器...")
             self._driver.get(url)
 
-            # 等待WAF验证和页面加载
             start_time = time.time()
-            last_check_time = 0
-            found_elements = False
             waf_detected = False
+            captcha_detected = False
+            check_count = 0  # 检查计数器
+            last_html_len = 0
+            stable_count = 0  # HTML 长度稳定计数
 
             while time.time() - start_time < DEFAULT_MAX_WAIT:
                 elapsed = time.time() - start_time
+                check_count += 1
 
-                # 每0.5秒检查一次页面状态
-                html = self._driver.page_source
-                html_len = len(html)
+                # 使用 JavaScript 一次性检测所有状态（比多次调用快）
+                try:
+                    state = self._driver.execute_script("""
+                        var html = document.documentElement.outerHTML;
+                        var elements = document.querySelectorAll('.ds-message, .ds-markdown');
+                        return {
+                            isWaf: html.indexOf('AwsWafIntegration') >= 0 || html.indexOf('challenge-container') >= 0,
+                            isCaptcha: html.indexOf('CAPTCHA') >= 0 || html.indexOf('验证') >= 0 || html.indexOf('拼图') >= 0 || html.indexOf('JavaScript is disabled') >= 0,
+                            elementCount: elements.length,
+                            htmlLen: html.length
+                        };
+                    """)
 
-                # 检测各种验证页面（只在特定情况下输出日志）
-                is_waf = "AwsWafIntegration" in html or "challenge-container" in html
-                is_captcha = "CAPTCHA" in html or "验证" in html or "拼图" in html or "JavaScript is disabled" in html
+                    element_count = state.get('elementCount', 0)
+                    html_len = state.get('htmlLen', 0)
+                    is_waf = state.get('isWaf', False)
+                    is_captcha = state.get('isCaptcha', False)
 
-                if is_waf:
-                    if not waf_detected:
-                        logger.info(f"  WAF验证中... 请在浏览器窗口中完成验证")
-                        waf_detected = True
-                    time.sleep(DEFAULT_WAF_CHECK_INTERVAL)
-                    continue
+                    # 优先检测元素：即使有 WAF 提示，如果元素已加载，说明页面可用
+                    if element_count > 0:
+                        logger.info(f"  页面加载完成! 找到 {element_count} 个消息元素 ({elapsed:.1f}s, 检查 {check_count} 次)")
+                        break
 
-                if is_captcha:
-                    if not waf_detected:
-                        logger.info(f"  需要真人验证! 请在浏览器窗口中完成验证")
-                        waf_detected = True
-                    time.sleep(DEFAULT_WAF_CHECK_INTERVAL)
-                    continue
+                    # WAF/CAPTCHA 检测（仅在元素未加载时）
+                    if is_waf:
+                        if not waf_detected:
+                            logger.info(f"  WAF验证中... 请在浏览器窗口中完成验证")
+                            waf_detected = True
+                        time.sleep(DEFAULT_WAF_CHECK_INTERVAL)
+                        continue
 
-                waf_detected = False  # 重置WAF检测状态
+                    if is_captcha:
+                        if not captcha_detected:
+                            logger.info(f"  需要真人验证! 请在浏览器窗口中完成验证")
+                            captcha_detected = True
+                        time.sleep(DEFAULT_WAF_CHECK_INTERVAL)
+                        continue
 
-                # 检查是否有对话元素（优化：减少检测频率）
-                if elapsed - last_check_time >= 0.5:
-                    last_check_time = elapsed
-                    try:
-                        # 使用更快的JavaScript检测
-                        has_content = self._driver.execute_script(
-                            "return document.querySelectorAll('.ds-message, .ds-markdown').length > 0;"
-                        )
-                        if has_content:
-                            found_elements = True
-                            element_count = self._driver.execute_script(
-                                "return document.querySelectorAll('.ds-message, .ds-markdown').length;"
-                            )
-                            logger.info(f"  页面加载完成! 找到{element_count}个消息元素 ({elapsed:.1f}s)")
+                    waf_detected = False
+                    captcha_detected = False
+
+                    # HTML 长度稳定性检测：如果连续 N 次长度相同，可能页面已加载完成
+                    if html_len == last_html_len and html_len > MIN_HTML_LEN_FOR_STABLE:
+                        stable_count += 1
+                        if stable_count >= STABLE_CHECK_THRESHOLD:
+                            logger.info(f"  HTML 长度稳定 ({html_len}), 可能已加载完成 ({elapsed:.1f}s)")
                             break
-                    except Exception:
-                        pass
+                    else:
+                        stable_count = 0
+                    last_html_len = html_len
 
-                # 如果HTML长度稳定且足够大，可能已经加载完成
-                if html_len > 50000 and elapsed > 3 and not found_elements:
-                    # 尝试最后一次元素检测
-                    try:
-                        element_count = self._driver.execute_script(
-                            "return document.querySelectorAll('.ds-message, .ds-markdown').length;"
-                        )
-                        if element_count > 0:
-                            logger.info(f"  页面加载完成! 找到{element_count}个消息元素 ({elapsed:.1f}s)")
-                            break
-                    except Exception:
-                        pass
+                except Exception as e:
+                    logger.debug(f"  状态检测失败: {e}")
 
-                time.sleep(DEFAULT_PAGE_LOAD_WAIT)
+                # 使用指数退避：初期快速检查，后期放慢
+                if elapsed < 3:
+                    time.sleep(0.1)  # 前 3 秒：快速检查
+                elif elapsed < 10:
+                    time.sleep(0.3)  # 3-10 秒：中等频率
+                else:
+                    time.sleep(DEFAULT_PAGE_LOAD_WAIT)  # 10 秒后：正常频率
 
+            # 获取最终 HTML（只在最后获取一次）
             html = self._driver.page_source
-            logger.info(f"  HTML长度: {len(html)} 字符, 耗时: {time.time() - start_time:.1f}s")
+            total_time = time.time() - start_time
+            logger.info(f"  HTML长度: {len(html)} 字符, 总耗时: {total_time:.1f}s")
 
             # 保存HTML供调试
             self._save_html_for_debug(html)
